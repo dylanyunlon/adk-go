@@ -32,4 +32,15 @@ type RunConfig struct {
 	// If true, ADK runner will save each part of the user input that is a blob
 	// (e.g., images, files) as an artifact.
 	SaveInputBlobsAsArtifacts bool
+
+	// DeadlineBudgetEnabled, when true, makes the runner reserve a fraction
+	// of the caller's context deadline for a closing model turn. When the
+	// budget is exhausted the run stops starting new tool calls, tells any
+	// still-running tool that its time is up, and asks the model to produce a
+	// partial answer that states what was completed and what was not.
+	//
+	// When the caller's context carries no deadline, or when this field is
+	// false (the default), behavior is unchanged: no budget is tracked and no
+	// wind-down happens.
+	DeadlineBudgetEnabled bool
 }

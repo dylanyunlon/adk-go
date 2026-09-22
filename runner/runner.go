@@ -32,6 +32,7 @@ import (
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	"google.golang.org/adk/v2/internal/compactioninternal"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/deadlinebudget"
 	"google.golang.org/adk/v2/internal/llminternal"
 	imemory "google.golang.org/adk/v2/internal/memory"
 	"google.golang.org/adk/v2/internal/plugininternal"
@@ -636,6 +637,15 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		})
 		ctx = plugininternal.ToContext(ctx, r.pluginManager)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
+
+		// Deadline budget: when enabled and the caller's context carries a
+		// deadline, reserve a fraction of the remaining time for a closing
+		// model turn so the invocation winds down with a partial answer
+		// instead of a transport error. The budget travels through the
+		// context so the flow can read it at each decision point.
+		if cfg.DeadlineBudgetEnabled {
+			ctx = deadlinebudget.ToContext(ctx, deadlinebudget.New(ctx))
+		}
 
 		// Compaction has to happen however iteration ends. Breaking out of the
 		// range loop on the terminal event is the ordinary streaming idiom, and
