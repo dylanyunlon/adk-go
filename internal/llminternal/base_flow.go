@@ -252,7 +252,8 @@ func (f *Flow) runWindDown(ctx agent.InvocationContext, budget *deadlinebudget.B
 		)
 
 		stateDelta := make(map[string]any)
-		for resp, err := range f.callLLM(ctx, req, stateDelta, nil) {
+		artifactDelta := make(map[string]int64)
+		for resp, err := range f.callLLM(ctx, req, stateDelta, artifactDelta) {
 			if err != nil {
 				yield(nil, err)
 				return
