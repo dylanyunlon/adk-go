@@ -35,6 +35,7 @@ import (
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/deadlinebudget"
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/v2/internal/telemetry"
@@ -122,7 +123,30 @@ const maxConsecutiveThoughtOnlyTurns = 10
 func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		thoughtOnlyTurns := 0
+		windDownIssued := false
 		for {
+			// Deadline budget: when the budget is exhausted and we have not
+			// yet issued a wind-down turn, ask the model for a closing
+			// response instead of running another tool-calling step. The
+			// wind-down strips tools from the request so the model cannot
+			// make function calls, and prepends an instruction listing what
+			// was completed and what was not.
+			if budget := deadlinebudget.FromContext(ctx); budget != nil && budget.Exhausted() && !windDownIssued {
+				windDownIssued = true
+				log.Printf("adk: agent %q (invocation %q): deadline budget exhausted, issuing wind-down turn",
+					ctx.Agent().Name(), ctx.InvocationID())
+				for ev, err := range f.runWindDown(ctx, budget) {
+					if err != nil {
+						yield(nil, err)
+						return
+					}
+					if !yield(ev, nil) {
+						return
+					}
+				}
+				return
+			}
+
 			var lastEvent *session.Event
 			for ev, err := range f.runOneStep(ctx) {
 				if err != nil {
@@ -163,6 +187,86 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				// not expected, so we log a warning and return instead of looping again.
 				log.Printf("adk: agent %q (invocation %q): step ended on a partial event from %q; the producer did not close its stream with an aggregated final event, so the turn will not appear in session history",
 					ctx.Agent().Name(), ctx.InvocationID(), lastEvent.Author)
+				return
+			}
+		}
+	}
+}
+
+// runWindDown asks the model for a closing response under deadline pressure.
+// It sends a request with no tools (so the model cannot make function calls)
+// and a system instruction listing what was completed and what was not.
+//
+// The issue points out: "Removing the tools a model can see is not the same
+// as clearing the dispatch registry. LLMRequest.Config.Tools carries the
+// declarations sent to the model, while LLMRequest.Tools is the map used to
+// resolve a call back to a Go value. Emptying the second hides nothing from
+// the model and turns a function call that still arrives into a tool not found
+// response." We clear both here.
+func (f *Flow) runWindDown(ctx agent.InvocationContext, budget *deadlinebudget.Budget) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if f.Model == nil {
+			yield(nil, fmt.Errorf("agent %q: %w", ctx.Agent().Name(), ErrModelNotConfigured))
+			return
+		}
+
+		req := &model.LLMRequest{
+			Model: f.Model.Name(),
+		}
+
+		// Run the normal preprocessors to assemble history and instructions.
+		for ev, err := range f.preprocess(ctx, req) {
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if ev != nil {
+				if !yield(ev, nil) {
+					return
+				}
+			}
+		}
+
+		// Strip all tool declarations so the model cannot make function calls.
+		if req.Config != nil {
+			req.Config.Tools = nil
+		}
+		req.Tools = nil
+
+		// Prepend the wind-down instruction to the system instruction.
+		windDown := budget.WindDownInstruction()
+		if req.Config == nil {
+			req.Config = &genai.GenerateContentConfig{}
+		}
+		existing := ""
+		if req.Config.SystemInstruction != nil {
+			for _, p := range req.Config.SystemInstruction.Parts {
+				if p != nil && p.Text != "" {
+					existing += p.Text + "\n"
+				}
+			}
+		}
+		req.Config.SystemInstruction = genai.NewContentFromText(
+			windDown+"\n"+existing,
+			genai.RoleUser,
+		)
+
+		stateDelta := make(map[string]any)
+		for resp, err := range f.callLLM(ctx, req, stateDelta, nil) {
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if err := f.postprocess(ctx, req, resp); err != nil {
+				yield(nil, err)
+				return
+			}
+			if resp.Content == nil && resp.ErrorCode == "" && !resp.Interrupted {
+				continue
+			}
+
+			ev := f.finalizeModelResponseEvent(ctx, resp, nil, stateDelta)
+			if !yield(ev, nil) {
 				return
 			}
 		}
@@ -1173,16 +1277,55 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 
 	fnResponseEvents := make([]*session.Event, len(fnCalls))
 
+	// Deadline budget: looked up once for all tool calls in this batch.
+	budget := deadlinebudget.FromContext(ctx)
+
 	// Tool calls run via the context's task runner: concurrent goroutines by
 	// default, or a caller-installed runner (platform.WithTaskRunner).
 	tasks := make([]func(context.Context), len(fnCalls))
 	for i, fnCall := range fnCalls {
 		tasks[i] = func(taskCtx context.Context) {
+			// Deadline budget: if the budget is already exhausted, refuse
+			// the call and tell the model it was skipped rather than failed.
+			if budget != nil && budget.Exhausted() {
+				budget.RecordAborted(fmt.Sprintf("tool %q skipped (deadline budget exhausted)", fnCall.Name))
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.LLMResponse = model.LLMResponse{
+					Content: &genai.Content{
+						Role: "user",
+						Parts: []*genai.Part{
+							{
+								FunctionResponse: &genai.FunctionResponse{
+									ID:   fnCall.ID,
+									Name: fnCall.Name,
+									Response: map[string]any{
+										"error": fmt.Sprintf("tool %q was not started: the invocation is running out of time and needs to produce a partial answer", fnCall.Name),
+									},
+								},
+							},
+						},
+					},
+				}
+				ev.Author = ctx.Agent().Name()
+				ev.Branch = ctx.Branch()
+				fnResponseEvents[i] = ev
+				return
+			}
+
 			sctx, span := telemetry.StartExecuteToolSpan(taskCtx, telemetry.StartExecuteToolSpanParams{
 				ToolName: fnCall.Name,
 				Args:     fnCall.Args,
 			})
 			defer span.End()
+
+			// Deadline budget: shorten the tool's context so it cannot run
+			// past the reserve boundary.
+			if budget != nil {
+				var toolCancelFn context.CancelFunc
+				sctx, toolCancelFn = budget.ToolDeadline(sctx)
+				defer toolCancelFn()
+			}
+
 			toolCallCtx := ctx.WithContext(sctx)
 			var confirmation *toolconfirmation.ToolConfirmation
 			if toolConfirmations != nil {
@@ -1273,6 +1416,21 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 					}
 				} else {
 					result = f.callTool(toolCtx, funcTool, fnCall.Args)
+				}
+			}
+
+			// Deadline budget: record whether the tool completed or was cut
+			// short. A context.DeadlineExceeded from the shortened context
+			// means the reserve boundary was hit while the tool was running.
+			if budget != nil && result != nil {
+				if errMsg, hasErr := result["error"]; hasErr {
+					if errStr, ok := errMsg.(string); ok && strings.Contains(errStr, context.DeadlineExceeded.Error()) {
+						budget.RecordAborted(fmt.Sprintf("tool %q cut short (deadline)", fnCall.Name))
+					} else {
+						budget.RecordCompleted(fmt.Sprintf("tool %q (returned error)", fnCall.Name))
+					}
+				} else {
+					budget.RecordCompleted(fmt.Sprintf("tool %q", fnCall.Name))
 				}
 			}
 
