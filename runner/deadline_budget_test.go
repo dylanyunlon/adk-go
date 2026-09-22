@@ -248,7 +248,7 @@ func TestDeadlineBudgetWindDownProducesPartialAnswer(t *testing.T) {
 
 	// The model will:
 	// 1. Request fast_tool (completes instantly)
-	// 2. Request slow_tool (takes 10s — but by then the budget is exhausted)
+	// 2. Request slow_tool (takes 10s, but by then the budget is exhausted)
 	// 3. The wind-down fires: model called with no tools, returns closing text
 	m := &budgetTestModel{
 		responses: []*model.LLMResponse{
@@ -270,7 +270,7 @@ func TestDeadlineBudgetWindDownProducesPartialAnswer(t *testing.T) {
 		t.Fatalf("llmagent.New: %v", err)
 	}
 
-	// 6s total, MinReserve = 5s → only 1s of tool time.
+	// 6s total, MinReserve = 5s, only 1s of tool time.
 	ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
 	defer cancel()
 
@@ -291,7 +291,7 @@ func TestDeadlineBudgetWindDownProducesPartialAnswer(t *testing.T) {
 	// The run must NOT end in a transport error. It must end with content.
 	last := events[len(events)-1]
 	if last.LLMResponse.Content == nil {
-		t.Fatal("last event has no content — expected a model-authored partial answer")
+		t.Fatal("last event has no content, expected a model-authored partial answer")
 	}
 
 	// We should see the closing answer from the model.
@@ -322,7 +322,7 @@ func TestDeadlineBudgetToolNotStartedWhenExhausted(t *testing.T) {
 		t.Fatalf("llmagent.New: %v", err)
 	}
 
-	// 3s total with 5s MinReserve → immediately exhausted.
+	// 3s total with 5s MinReserve, immediately exhausted.
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 
@@ -370,7 +370,7 @@ func TestDeadlineBudgetToolCutShort(t *testing.T) {
 		t.Fatalf("llmagent.New: %v", err)
 	}
 
-	// 6s total, 5s reserve → 1s for tools. slow_tool's 30s will be cut.
+	// 6s total, 5s reserve, 1s for tools. slow_tool's 30s will be cut.
 	ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
 	defer cancel()
 
@@ -412,7 +412,7 @@ func TestDeadlineBudgetToolCutShort(t *testing.T) {
 
 // TestDeadlineBudgetWithSourceChangeReverted verifies the claim in the PR
 // body: "With your source change reverted and your tests kept, which test
-// fails?" This test does not actually revert the source — it tests the
+// fails?" This test does not actually revert the source, it tests the
 // concrete behavior that would be absent without the change: with
 // DeadlineBudgetEnabled=true and a tight deadline, the events contain a
 // model-authored final answer rather than ending in DeadlineExceeded.
@@ -472,7 +472,7 @@ func TestDeadlineBudgetWithSourceChangeReverted(t *testing.T) {
 	}
 
 	if sawError {
-		t.Fatal("Run produced an error — without the budget integration this would be context.DeadlineExceeded")
+		t.Fatal("Run produced an error, without the budget integration this would be context.DeadlineExceeded")
 	}
 	if !sawGraceful {
 		t.Fatal("Run did not produce the graceful partial answer")

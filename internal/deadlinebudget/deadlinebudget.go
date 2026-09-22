@@ -55,7 +55,7 @@ const DefaultReserve = 0.15
 
 // MinReserve is the smallest absolute reserve the budget will use. A very
 // short deadline gets its full reserve as MinReserve, which may consume the
-// entire budget — in that case the invocation winds down immediately. This
+// entire budget, in that case the invocation winds down immediately. This
 // is intentional: a budget shorter than one model call has no room for tools.
 const MinReserve = 5 * time.Second
 
