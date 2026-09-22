@@ -24,16 +24,16 @@
 //     the model's closing turn. The remaining time is available for tool
 //     calls. When the remaining time crosses the reserve boundary:
 //
-//       1. New tool calls are refused. The function response says the tool
-//          was not started and the invocation needs to produce a partial
-//          answer.
+//     1. New tool calls are refused. The function response says the tool
+//     was not started and the invocation needs to produce a partial
+//     answer.
 //
-//       2. A tool that is already running has its context cancelled at the
-//          reserve boundary. The tool's error is recorded as "cut short."
+//     2. A tool that is already running has its context cancelled at the
+//     reserve boundary. The tool's error is recorded as "cut short."
 //
-//       3. The model is called one more time with no tools and an instruction
-//          listing what was completed and what was cut short. The model's
-//          response is the invocation's final answer.
+//     3. The model is called one more time with no tools and an instruction
+//     listing what was completed and what was cut short. The model's
+//     response is the invocation's final answer.
 //
 //   - The wind-down instruction is prepended to the existing system
 //     instruction, not appended, because the model should see the urgency
